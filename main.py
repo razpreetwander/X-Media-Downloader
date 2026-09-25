@@ -95,7 +95,7 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'format': '*',  # Accept any stream format available
+        'format': '*',  # Strict filtering disable kardi gayi hai
         'check_formats': False,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
@@ -151,6 +151,7 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                     raise Exception("No data extracted")
 
                 formats = []
+                audio_only_formats = []
                 raw_formats = info.get("formats", [])
                 
                 if not raw_formats and info.get("url"):
@@ -158,34 +159,45 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 
                 for fmt in raw_formats:
                     if fmt.get("url"):
-                        res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "video/audio"
-                        formats.append({
+                        vcodec = fmt.get("vcodec")
+                        acodec = fmt.get("acodec")
+                        res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "media"
+                        
+                        item = {
                             "format_id": fmt.get("format_id", "0"),
-                            "ext": fmt.get("ext", "mp4"),
-                            "resolution": res,
+                            "ext": fmt.get("ext", "m4a" if vcodec == "none" else "mp4"),
+                            "resolution": "Audio Only" if vcodec == "none" else res,
                             "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
-                            "vcodec": fmt.get("vcodec"),
-                            "acodec": fmt.get("acodec"),
+                            "vcodec": vcodec,
+                            "acodec": acodec,
                             "url": fmt.get("url")
-                        })
+                        }
+                        
+                        formats.append(item)
+                        # Audio-only streams filter
+                        if vcodec == "none" and acodec and acodec != "none":
+                            audio_only_formats.append(item)
 
-                if not formats and info.get("url"):
-                    formats.append({
+                # Agar frontend audio mangta hai aur alag se audio format mil gaya toh wo prioritise hoga, nahi toh general list jayegi
+                output_formats = audio_only_formats if audio_only_formats else formats
+
+                if not output_formats and info.get("url"):
+                    output_formats.append({
                         "format_id": "0",
-                        "ext": info.get("ext", "mp4"),
-                        "resolution": "Original Format",
+                        "ext": "m4a",
+                        "resolution": "Audio Stream",
                         "filesize": None,
-                        "vcodec": None,
-                        "acodec": None,
+                        "vcodec": "none",
+                        "acodec": "default",
                         "url": info.get("url")
                     })
 
                 return {
-                    "title": info.get("title", "YouTube Video"),
+                    "title": info.get("title", "YouTube Audio"),
                     "duration": info.get("duration"),
                     "thumbnail": info.get("thumbnail"),
                     "uploader": info.get("uploader"),
-                    "formats": formats
+                    "formats": output_formats
                 }
 
         except Exception as e:
@@ -208,10 +220,8 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
 
-        # Smart format parsing for Audio / Music Requests
-        if format_id in ["bestaudio", "audio", "ba", "mp3", "m4a"]:
-            target_fmt = "bestaudio/ba/b/best/*"
-        elif format_id and format_id != "best":
+        # Target format calculation: error prone rigid strings avoid kiye gaye hain
+        if format_id and format_id not in ["best", "bestaudio", "audio"]:
             target_fmt = f"{format_id}/*"
         else:
             target_fmt = "*"
@@ -240,8 +250,8 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         except Exception as e:
             last_error = str(e)
             print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
-
-            # Fallback for Audio: extract direct stream if audio-only format fails
+            
+            # Universal Fallback Strategy
             try:
                 fallback_opts = build_yt_dlp_options(proxy, cookie_file, {'format': '*'})
                 with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
@@ -251,7 +261,7 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
                         return {
                             "download_url": fb_url,
                             "title": fb_info.get("title"),
-                            "ext": fb_info.get("ext", "mp4")
+                            "ext": "m4a"
                         }
             except Exception:
                 pass
