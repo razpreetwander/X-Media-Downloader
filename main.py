@@ -11,10 +11,9 @@ import yt_dlp
 
 app = FastAPI(
     title="X Media Downloader Ultra Engine",
-    version="4.0.0"
+    version="4.1.0"
 )
 
-# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -58,24 +57,76 @@ def check_tor_active(host="127.0.0.1", port=9050) -> bool:
             s.settimeout(1)
             return s.connect_ex((host, port)) == 0
     except Exception:
-        return False
+        False
 
 def get_proxy_for_attempt(attempt: int) -> Optional[str]:
     if attempt == 0:
-        return None  # Direct request for maximum speed
+        return None
     elif attempt == 1 and check_tor_active():
         return TOR_SOCKS_PROXY
     elif CUSTOM_PROXIES:
         return CUSTOM_PROXIES[attempt % len(CUSTOM_PROXIES)]
     return None
 
+# Helper function to format bytes into readable MB/GB
+def format_bytes(size_in_bytes: Optional[int]) -> str:
+    if not size_in_bytes:
+        return ""
+    mb = size_in_bytes / (1024 * 1024)
+    if mb >= 1024:
+        return f" ({mb / 1024:.2f} GB)"
+    return f" ({mb:.1f} MB)"
+
+# Helper function to clean resolution labels (e.g. 1080p, 4K)
+def clean_resolution(fmt: dict) -> str:
+    height = fmt.get("height")
+    note = str(fmt.get("format_note", "")).upper()
+    vcodec = fmt.get("vcodec", "")
+
+    if vcodec == "none":
+        return "Audio Only"
+
+    if height:
+        if height >= 2160:
+            return "4K (2160p)"
+        elif height >= 1440:
+            return "2K (1440p)"
+        elif height >= 1080:
+            return "1080p (FHD)"
+        elif height >= 720:
+            return "720p (HD)"
+        elif height >= 480:
+            return "480p"
+        elif height >= 360:
+            return "360p"
+        elif height >= 240:
+            return "240p"
+        elif height >= 144:
+            return "144p"
+        return f"{height}p"
+
+    if "1080" in note:
+        return "1080p (FHD)"
+    elif "720" in note:
+        return "720p (HD)"
+    elif "4K" in note or "2160" in note:
+        return "4K (2160p)"
+
+    return "Video"
+
 def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str]) -> dict:
     opts = {
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        'socket_timeout': 5,  # fast response, no 1 min loading!
+        'socket_timeout': 6,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['mweb', 'android', 'ios'],
+                'skip': ['configs']
+            }
+        }
     }
 
     if proxy:
@@ -88,7 +139,7 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str]) -> di
 
 @app.get("/")
 def home():
-    return {"status": "online", "engine": "Fast Pure Audio/Video Engine"}
+    return {"status": "online", "engine": "X Media Downloader Hybrid Engine"}
 
 @app.get("/info")
 def get_info(url: str = Query(...), type: Optional[str] = Query(default="video")):
@@ -122,42 +173,46 @@ def get_info(url: str = Query(...), type: Optional[str] = Query(default="video")
 
                     vcodec = fmt.get("vcodec", "")
                     acodec = fmt.get("acodec", "")
-                    filesize = fmt.get("filesize") or fmt.get("filesize_approx")
+                    raw_size = fmt.get("filesize") or fmt.get("filesize_approx")
+                    size_str = format_bytes(raw_size)
                     fmt_id = str(fmt.get("format_id", "best"))
 
-                    # MUSIC TAB FILTERING: Only Audios Output
-                    if type == "music" or type == "audio":
-                        if vcodec == "none" or "audio" in fmt.get("format_note", "").lower():
+                    # MUSIC TAB FILTERING: Only Audio streams
+                    if type in ["music", "audio"]:
+                        if vcodec == "none" and acodec and acodec != "none":
+                            ext_type = fmt.get("ext", "m4a")
                             formatted_list.append({
                                 "format_id": fmt_id,
-                                "ext": fmt.get("ext", "m4a"),
-                                "resolution": "Audio Only",
-                                "filesize": filesize,
+                                "ext": ext_type,
+                                "resolution": f"Audio ({ext_type.upper()}){size_str}",
+                                "filesize": raw_size,
                                 "vcodec": "none",
                                 "acodec": acodec,
                                 "url": fmt_url
                             })
-                    # YOUTUBE TAB FILTERING: All Formats
+
+                    # VIDEO TAB FILTERING: Clean resolutions + Size
                     else:
-                        res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "Video"
+                        res_label = clean_resolution(fmt)
                         formatted_list.append({
                             "format_id": fmt_id,
                             "ext": fmt.get("ext", "mp4"),
-                            "resolution": res,
-                            "filesize": filesize,
+                            "resolution": f"{res_label}{size_str}",
+                            "filesize": raw_size,
                             "vcodec": vcodec,
                             "acodec": acodec,
                             "url": fmt_url
                         })
 
-                # Fallback if no specific format extracted
+                # Fallback strategy
                 if not formatted_list and info.get("url"):
+                    size_str = format_bytes(info.get("filesize") or info.get("filesize_approx"))
                     formatted_list.append({
                         "format_id": "best",
-                        "ext": "m4a" if type == "music" else "mp4",
-                        "resolution": "Audio Stream" if type == "music" else "Original Stream",
+                        "ext": "m4a" if type in ["music", "audio"] else "mp4",
+                        "resolution": ("Audio Stream" if type in ["music", "audio"] else "Standard Quality") + size_str,
                         "filesize": None,
-                        "vcodec": "none" if type == "music" else None,
+                        "vcodec": "none" if type in ["music", "audio"] else None,
                         "acodec": "default",
                         "url": info.get("url")
                     })
@@ -172,7 +227,7 @@ def get_info(url: str = Query(...), type: Optional[str] = Query(default="video")
 
         except Exception as e:
             last_error = str(e)
-            if "bot" in last_error.lower() or "429" in last_error:
+            if any(err in last_error.lower() for err in ["reloaded", "bot", "429", "confirm"]):
                 trigger_tor_new_ip()
 
     return JSONResponse(
@@ -194,11 +249,10 @@ def download_stream(url: str = Query(...), format_id: Optional[str] = Query(defa
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if not info:
-                    raise Exception("Failed to load video stream")
+                    raise Exception("Failed to load stream")
 
                 target_url = None
 
-                # Find requested format URL safely
                 if format_id and info.get("formats"):
                     for fmt in info["formats"]:
                         if str(fmt.get("format_id")) == str(format_id) and fmt.get("url"):
@@ -220,7 +274,7 @@ def download_stream(url: str = Query(...), format_id: Optional[str] = Query(defa
 
         except Exception as e:
             last_error = str(e)
-            if "bot" in last_error.lower() or "429" in last_error:
+            if any(err in last_error.lower() for err in ["reloaded", "bot", "429"]):
                 trigger_tor_new_ip()
 
     return JSONResponse(
