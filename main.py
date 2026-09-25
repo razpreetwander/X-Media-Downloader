@@ -95,12 +95,12 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'format': 'b/best/bestvideo+bestaudio', # Dynamic fallback to available formats
+        'check_formats': False,  # Format checking fail होने से रोकता है
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb'],
-                'skip': ['configs']
+                'player_client': ['tv_embedded', 'android', 'web'],
+                'player_skip': ['webpage', 'configs']
             }
         }
     }
@@ -141,8 +141,8 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 
         print(f"[Attempt {attempt + 1}/3] Fetching info | Proxy: {proxy or 'Direct'} | Cookie: {cookie_file or 'None'}")
 
-        # Override format option for /info to get all available streams
-        ydl_opts = build_yt_dlp_options(proxy, cookie_file, {'format': None})
+        # Format restriction पूरी तरह से हटा दी गई है
+        ydl_opts = build_yt_dlp_options(proxy, cookie_file)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -150,26 +150,31 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 
                 formats = []
                 raw_formats = info.get("formats", [])
-                
+
                 if not raw_formats and info.get("url"):
                     raw_formats = [info]
 
                 for fmt in raw_formats:
-                    # Filter only streams that have a direct playable URL
-                    if fmt.get("url"):
-                        res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "video"
-                        formats.append({
-                            "format_id": fmt.get("format_id", "best"),
-                            "ext": fmt.get("ext", "mp4"),
-                            "resolution": res,
-                            "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
-                            "vcodec": fmt.get("vcodec"),
-                            "acodec": fmt.get("acodec"),
-                            "url": fmt.get("url")
-                        })
+                    # Video/Audio resolution extract करना
+                    res = fmt.get("resolution")
+                    if not res or res == "multiple":
+                        if fmt.get("height"):
+                            res = f"{fmt.get('height')}p"
+                        else:
+                            res = fmt.get("format_note") or "Audio/Video"
+
+                    formats.append({
+                        "format_id": fmt.get("format_id", "best"),
+                        "ext": fmt.get("ext", "mp4"),
+                        "resolution": res,
+                        "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
+                        "vcodec": fmt.get("vcodec"),
+                        "acodec": fmt.get("acodec"),
+                        "url": fmt.get("url") or info.get("url")
+                    })
 
                 return {
-                    "title": info.get("title", "YouTube Media"),
+                    "title": info.get("title", "YouTube Video"),
                     "duration": info.get("duration"),
                     "thumbnail": info.get("thumbnail"),
                     "uploader": info.get("uploader"),
@@ -180,7 +185,7 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
             last_error = str(e)
             print(f"[Error Attempt {attempt + 1}]: {last_error}")
 
-            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "429" in last_error or "reloaded" in last_error.lower() or "player response" in last_error.lower():
+            if any(err in last_error.lower() for err in ["sign in to confirm", "bot", "429", "reloaded", "player response"]):
                 trigger_tor_new_ip()
 
     return JSONResponse(
@@ -192,8 +197,8 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 def download_stream(url: str = Query(...), format_id: str = Query(default=None)):
     last_error = ""
 
-    # Dynamic format fallback string
-    target_format = format_id if (format_id and format_id != "best") else "b/best/bestvideo+bestaudio"
+    # अगर format_id सही न मिले तो "best" ऑटो-फॉलस्टैंक करेगा
+    target_format = format_id if (format_id and format_id != "best") else "bestvideo+bestaudio/best"
 
     for attempt in range(3):
         cookie_file = get_next_cookie_file()
@@ -220,7 +225,23 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         except Exception as e:
             last_error = str(e)
             print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
-            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "reloaded" in last_error.lower() or "player response" in last_error.lower():
+            
+            # Error Fallback: अगर चुना हुआ format ना मिले तो 'best' से डायरेक्ट लिंक निकालना
+            try:
+                fallback_opts = build_yt_dlp_options(proxy, cookie_file, {'format': 'best'})
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                    fb_info = ydl_fb.extract_info(url, download=False)
+                    fb_url = fb_info.get("url")
+                    if fb_url:
+                        return {
+                            "download_url": fb_url,
+                            "title": fb_info.get("title"),
+                            "ext": fb_info.get("ext")
+                        }
+            except Exception:
+                pass
+
+            if any(err in last_error.lower() for err in ["sign in to confirm", "bot", "reloaded", "player response"]):
                 trigger_tor_new_ip()
 
     return JSONResponse(
