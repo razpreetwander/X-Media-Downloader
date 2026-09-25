@@ -95,7 +95,7 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'format': '*',  # 'all' formats allowed without restriction
+        'format': '*',  # Accept any stream format available
         'check_formats': False,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
@@ -157,7 +157,6 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                     raw_formats = [info]
 
                 for fmt in raw_formats:
-                    # Collect every available direct format URL
                     if fmt.get("url"):
                         res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "video/audio"
                         formats.append({
@@ -170,7 +169,6 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                             "url": fmt.get("url")
                         })
 
-                # Fallback if yt-dlp returns main URL directly
                 if not formats and info.get("url"):
                     formats.append({
                         "format_id": "0",
@@ -210,10 +208,15 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
 
-        # If format_id is provided, request that specific ID; otherwise fallback to '*'
-        target_fmt = format_id if (format_id and format_id != "best") else "*"
+        # Smart format parsing for Audio / Music Requests
+        if format_id in ["bestaudio", "audio", "ba", "mp3", "m4a"]:
+            target_fmt = "bestaudio/ba/b/best/*"
+        elif format_id and format_id != "best":
+            target_fmt = f"{format_id}/*"
+        else:
+            target_fmt = "*"
+
         extra_opts = {'format': target_fmt}
-        
         ydl_opts = build_yt_dlp_options(proxy, cookie_file, extra_opts)
 
         try:
@@ -231,12 +234,28 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
                     return {
                         "download_url": download_url,
                         "title": info.get("title"),
-                        "ext": info.get("ext")
+                        "ext": info.get("ext", "m4a")
                     }
 
         except Exception as e:
             last_error = str(e)
             print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
+
+            # Fallback for Audio: extract direct stream if audio-only format fails
+            try:
+                fallback_opts = build_yt_dlp_options(proxy, cookie_file, {'format': '*'})
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                    fb_info = ydl_fb.extract_info(url, download=False)
+                    fb_url = fb_info.get("url")
+                    if fb_url:
+                        return {
+                            "download_url": fb_url,
+                            "title": fb_info.get("title"),
+                            "ext": fb_info.get("ext", "mp4")
+                        }
+            except Exception:
+                pass
+
             if any(err in last_error.lower() for err in ["sign in to confirm", "bot", "reloaded", "player response"]):
                 trigger_tor_new_ip()
 
