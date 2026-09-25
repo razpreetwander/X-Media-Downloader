@@ -95,10 +95,11 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
+        'format': 'best',
         'user_agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11; US) gzip',
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android'],
+                'player_client': ['android', 'ios', 'mweb'],
                 'skip': ['webpage']
             }
         }
