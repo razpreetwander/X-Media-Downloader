@@ -15,7 +15,7 @@ app = FastAPI(
     version="3.0.0"
 )
 
-# CORS Middleware (Frontend with zero changes supported)
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,8 +27,6 @@ app.add_middleware(
 TOR_SOCKS_PROXY = "socks5://127.0.0.1:9050"
 TOR_CONTROL_PORT = 9051
 
-# Multiple Webshare / Custom proxies support (Comma separated in env variable)
-# Example: "http://user:pass@proxy1:8080,http://user:pass@proxy2:8080"
 RAW_PROXIES = os.getenv("PROXY_URL", "").strip()
 CUSTOM_PROXIES: List[str] = [p.strip() for p in RAW_PROXIES.split(",") if p.strip()]
 
@@ -37,10 +35,6 @@ cookie_lock = threading.Lock()
 cookie_index = 0
 
 def get_next_cookie_file() -> Optional[str]:
-    """
-    1st Req -> cookie1.txt, 2nd Req -> cookie2.txt, ... 
-    Iterates sequentially through all available cookies and loops back to 1.
-    """
     global cookie_index
     cookie_files = sorted(glob.glob("cookies*.txt"))
     if not cookie_files:
@@ -53,9 +47,6 @@ def get_next_cookie_file() -> Optional[str]:
         return selected_cookie
 
 def trigger_tor_new_ip():
-    """
-    Sends SIGNAL NEWNYM to Tor Control Port to instantly obtain a fresh Exit IP.
-    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(2)
@@ -66,7 +57,6 @@ def trigger_tor_new_ip():
         print(f"[Tor Control Error]: Could not renew IP - {e}")
 
 def check_tor_active(host="127.0.0.1", port=9050) -> bool:
-    """Checks if local Tor SOCKS5 daemon is running."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1)
@@ -75,13 +65,6 @@ def check_tor_active(host="127.0.0.1", port=9050) -> bool:
         return False
 
 def get_proxy_for_attempt(attempt: int) -> Optional[str]:
-    """
-    Returns proxy based on attempt count:
-    Attempt 0: Try Tor SOCKS5
-    Attempt 1: Try Custom Webshare Proxy (if provided)
-    Attempt 2: Request New Tor IP and try Tor again
-    Attempt 3: Direct connection fallback
-    """
     tor_available = check_tor_active()
 
     if attempt == 0:
@@ -92,7 +75,6 @@ def get_proxy_for_attempt(attempt: int) -> Optional[str]:
 
     elif attempt == 1:
         if CUSTOM_PROXIES:
-            # Pick a proxy based on attempt
             return CUSTOM_PROXIES[attempt % len(CUSTOM_PROXIES)]
         elif tor_available:
             trigger_tor_new_ip()
@@ -112,7 +94,14 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
-        'skip_download': True, # Keep server RAM/disk safe
+        'skip_download': True,
+        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android_creator'],
+                'player_skip': ['webpage', 'configs'],
+            }
+        }
     }
 
     if proxy:
@@ -145,7 +134,6 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 
     last_error = ""
 
-    # Maximum 3 attempts with automated fallback, new IP & next cookie
     for attempt in range(3):
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
@@ -183,11 +171,9 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
             last_error = str(e)
             print(f"[Error Attempt {attempt + 1}]: {last_error}")
             
-            # If bot detection or sign in error occurred, trigger new Tor IP for next try
-            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "429" in last_error:
+            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "429" in last_error or "reloaded" in last_error.lower():
                 trigger_tor_new_ip()
 
-    # If all 3 attempts fail, return structured error
     return JSONResponse(
         status_code=500,
         content={"detail": f"Failed after 3 automatic retries: {last_error}"}
@@ -201,7 +187,8 @@ def download_stream(url: str = Query(...), format_id: str = Query(default="best"
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
 
-        ydl_opts = build_yt_dlp_options(proxy, cookie_file, {'format': format_id})
+        extra_opts = {'format': format_id}
+        ydl_opts = build_yt_dlp_options(proxy, cookie_file, extra_opts)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -221,21 +208,10 @@ def download_stream(url: str = Query(...), format_id: str = Query(default="best"
         except Exception as e:
             last_error = str(e)
             print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
-            if "Sign in to confirm" in last_error or "bot" in last_error.lower():
+            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "reloaded" in last_error.lower():
                 trigger_tor_new_ip()
 
     return JSONResponse(
         status_code=500,
         content={"detail": f"Failed to generate stream link: {last_error}"}
     )
-ydl_opts = {
-    'cookiefile': 'cookies.txt',
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    },
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'web'], # YouTube बोट चेक को बायपास करने के लिए
-        }
-    }
-}
