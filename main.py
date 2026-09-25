@@ -228,3 +228,14 @@ def download_stream(url: str = Query(...), format_id: str = Query(default="best"
         status_code=500,
         content={"detail": f"Failed to generate stream link: {last_error}"}
     )
+ydl_opts = {
+    'cookiefile': 'cookies.txt',
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    },
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web'], # YouTube बोट चेक को बायपास करने के लिए
+        }
+    }
+}
