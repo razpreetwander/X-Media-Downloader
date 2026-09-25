@@ -90,13 +90,12 @@ def get_proxy_for_attempt(attempt: int) -> Optional[str]:
     return None
 
 def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra_opts: dict = None) -> dict:
+    # Notice: Strictly NO 'format' key here to prevent "Requested format not available"
     opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'format': '*',  # Strict filtering disable kardi gayi hai
-        'check_formats': False,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
             'youtube': {
@@ -151,7 +150,6 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                     raise Exception("No data extracted")
 
                 formats = []
-                audio_only_formats = []
                 raw_formats = info.get("formats", [])
                 
                 if not raw_formats and info.get("url"):
@@ -161,43 +159,40 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                     if fmt.get("url"):
                         vcodec = fmt.get("vcodec")
                         acodec = fmt.get("acodec")
-                        res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "media"
                         
-                        item = {
+                        # Label properly for UI display
+                        if vcodec == "none" and acodec != "none":
+                            res_label = "Audio Only"
+                        else:
+                            res_label = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "Video"
+
+                        formats.append({
                             "format_id": fmt.get("format_id", "0"),
-                            "ext": fmt.get("ext", "m4a" if vcodec == "none" else "mp4"),
-                            "resolution": "Audio Only" if vcodec == "none" else res,
+                            "ext": fmt.get("ext", "mp4"),
+                            "resolution": res_label,
                             "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
                             "vcodec": vcodec,
                             "acodec": acodec,
                             "url": fmt.get("url")
-                        }
-                        
-                        formats.append(item)
-                        # Audio-only streams filter
-                        if vcodec == "none" and acodec and acodec != "none":
-                            audio_only_formats.append(item)
+                        })
 
-                # Agar frontend audio mangta hai aur alag se audio format mil gaya toh wo prioritise hoga, nahi toh general list jayegi
-                output_formats = audio_only_formats if audio_only_formats else formats
-
-                if not output_formats and info.get("url"):
-                    output_formats.append({
+                if not formats and info.get("url"):
+                    formats.append({
                         "format_id": "0",
-                        "ext": "m4a",
-                        "resolution": "Audio Stream",
+                        "ext": info.get("ext", "mp4"),
+                        "resolution": "Direct Stream",
                         "filesize": None,
-                        "vcodec": "none",
-                        "acodec": "default",
+                        "vcodec": None,
+                        "acodec": None,
                         "url": info.get("url")
                     })
 
                 return {
-                    "title": info.get("title", "YouTube Audio"),
+                    "title": info.get("title", "YouTube Media"),
                     "duration": info.get("duration"),
                     "thumbnail": info.get("thumbnail"),
                     "uploader": info.get("uploader"),
-                    "formats": output_formats
+                    "formats": formats
                 }
 
         except Exception as e:
@@ -220,14 +215,8 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
 
-        # Target format calculation: error prone rigid strings avoid kiye gaye hain
-        if format_id and format_id not in ["best", "bestaudio", "audio"]:
-            target_fmt = f"{format_id}/*"
-        else:
-            target_fmt = "*"
-
-        extra_opts = {'format': target_fmt}
-        ydl_opts = build_yt_dlp_options(proxy, cookie_file, extra_opts)
+        # Do NOT pass format filters to yt-dlp to avoid format resolution crashes
+        ydl_opts = build_yt_dlp_options(proxy, cookie_file)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -235,7 +224,18 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
                 if not info:
                     raise Exception("No info received")
 
-                download_url = info.get("url")
+                download_url = None
+
+                # Find specific URL matching requested format_id if available
+                if format_id and info.get("formats"):
+                    for fmt in info["formats"]:
+                        if str(fmt.get("format_id")) == str(format_id) and fmt.get("url"):
+                            download_url = fmt.get("url")
+                            break
+
+                # Fallback to general URL
+                if not download_url:
+                    download_url = info.get("url")
 
                 if not download_url and "requested_formats" in info and len(info["requested_formats"]) > 0:
                     download_url = info["requested_formats"][0].get("url")
@@ -244,28 +244,12 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
                     return {
                         "download_url": download_url,
                         "title": info.get("title"),
-                        "ext": info.get("ext", "m4a")
+                        "ext": info.get("ext", "mp4")
                     }
 
         except Exception as e:
             last_error = str(e)
             print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
-            
-            # Universal Fallback Strategy
-            try:
-                fallback_opts = build_yt_dlp_options(proxy, cookie_file, {'format': '*'})
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
-                    fb_info = ydl_fb.extract_info(url, download=False)
-                    fb_url = fb_info.get("url")
-                    if fb_url:
-                        return {
-                            "download_url": fb_url,
-                            "title": fb_info.get("title"),
-                            "ext": "m4a"
-                        }
-            except Exception:
-                pass
-
             if any(err in last_error.lower() for err in ["sign in to confirm", "bot", "reloaded", "player response"]):
                 trigger_tor_new_ip()
 
