@@ -95,11 +95,11 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'user_agent': 'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV) AppleWebKit/537.42 (KHTML, like Gecko) SmartTV Safari/537.42',
+        'user_agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11; US) gzip',
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embedded', 'mweb', 'web'],
-                'player_skip': ['configs']
+                'player_client': ['ios', 'android'],
+                'skip': ['webpage']
             }
         }
     }
