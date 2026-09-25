@@ -5,14 +5,13 @@ import socket
 import threading
 from typing import List, Optional
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 
 app = FastAPI(
-    title="X Media Downloader Ultra-Reliable API",
-    description="Backend with Round-Robin Cookies, Tor Auto-IP Renewal and Webshare Fallback.",
-    version="3.0.0"
+    title="X Media Downloader Ultra Engine",
+    version="4.0.0"
 )
 
 # CORS Middleware
@@ -30,7 +29,6 @@ TOR_CONTROL_PORT = 9051
 RAW_PROXIES = os.getenv("PROXY_URL", "").strip()
 CUSTOM_PROXIES: List[str] = [p.strip() for p in RAW_PROXIES.split(",") if p.strip()]
 
-# Round-Robin Cookie Tracking
 cookie_lock = threading.Lock()
 cookie_index = 0
 
@@ -43,18 +41,16 @@ def get_next_cookie_file() -> Optional[str]:
     with cookie_lock:
         selected_cookie = cookie_files[cookie_index % len(cookie_files)]
         cookie_index += 1
-        print(f"[Cookie System] Round-Robin Selected: {selected_cookie}")
         return selected_cookie
 
 def trigger_tor_new_ip():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(2)
+            s.settimeout(1)
             s.connect(("127.0.0.1", TOR_CONTROL_PORT))
             s.sendall(b'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT\r\n')
-            print("[Tor System] Successfully requested NEWNYM (New Circuit / Fresh IP obtained)")
-    except Exception as e:
-        print(f"[Tor Control Error]: Could not renew IP - {e}")
+    except Exception:
+        pass
 
 def check_tor_active(host="127.0.0.1", port=9050) -> bool:
     try:
@@ -65,44 +61,21 @@ def check_tor_active(host="127.0.0.1", port=9050) -> bool:
         return False
 
 def get_proxy_for_attempt(attempt: int) -> Optional[str]:
-    tor_available = check_tor_active()
-
     if attempt == 0:
-        if tor_available:
-            return TOR_SOCKS_PROXY
-        elif CUSTOM_PROXIES:
-            return CUSTOM_PROXIES[0]
-
-    elif attempt == 1:
-        if CUSTOM_PROXIES:
-            return CUSTOM_PROXIES[attempt % len(CUSTOM_PROXIES)]
-        elif tor_available:
-            trigger_tor_new_ip()
-            time.sleep(1)
-            return TOR_SOCKS_PROXY
-
-    elif attempt == 2:
-        if tor_available:
-            trigger_tor_new_ip()
-            time.sleep(1.5)
-            return TOR_SOCKS_PROXY
-
+        return None  # Direct request for maximum speed
+    elif attempt == 1 and check_tor_active():
+        return TOR_SOCKS_PROXY
+    elif CUSTOM_PROXIES:
+        return CUSTOM_PROXIES[attempt % len(CUSTOM_PROXIES)]
     return None
 
-def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra_opts: dict = None) -> dict:
-    # Notice: Strictly NO 'format' key here to prevent "Requested format not available"
+def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str]) -> dict:
     opts = {
         'quiet': True,
         'no_warnings': True,
-        'extract_flat': False,
         'skip_download': True,
+        'socket_timeout': 5,  # fast response, no 1 min loading!
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'mweb'],
-                'skip': ['configs']
-            }
-        }
     }
 
     if proxy:
@@ -111,27 +84,16 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
     if cookie_file:
         opts['cookiefile'] = cookie_file
 
-    if extra_opts:
-        opts.update(extra_opts)
-
     return opts
 
 @app.get("/")
 def home():
-    tor_status = check_tor_active()
-    cookie_count = len(glob.glob("cookies*.txt"))
-    return {
-        "status": "online",
-        "service": "X Media Downloader Ultra Engine",
-        "tor_proxy_active": tor_status,
-        "custom_proxies_loaded": len(CUSTOM_PROXIES),
-        "total_cookie_files": cookie_count
-    }
+    return {"status": "online", "engine": "Fast Pure Audio/Video Engine"}
 
 @app.get("/info")
-def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
+def get_info(url: str = Query(...), type: Optional[str] = Query(default="video")):
     if not url:
-        raise HTTPException(status_code=400, detail="URL parameter is required")
+        raise HTTPException(status_code=400, detail="URL is required")
 
     last_error = ""
 
@@ -139,121 +101,129 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
 
-        print(f"[Attempt {attempt + 1}/3] Fetching info | Proxy: {proxy or 'Direct'} | Cookie: {cookie_file or 'None'}")
-
         ydl_opts = build_yt_dlp_options(proxy, cookie_file)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if not info:
-                    raise Exception("No data extracted")
+                    raise Exception("Unable to extract info")
 
-                formats = []
-                raw_formats = info.get("formats", [])
-                
-                if not raw_formats and info.get("url"):
-                    raw_formats = [info]
+                all_formats = info.get("formats", [])
+                if not all_formats and info.get("url"):
+                    all_formats = [info]
 
-                for fmt in raw_formats:
-                    if fmt.get("url"):
-                        vcodec = fmt.get("vcodec")
-                        acodec = fmt.get("acodec")
-                        
-                        # Label properly for UI display
-                        if vcodec == "none" and acodec != "none":
-                            res_label = "Audio Only"
-                        else:
-                            res_label = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "Video"
+                formatted_list = []
 
-                        formats.append({
-                            "format_id": fmt.get("format_id", "0"),
+                for fmt in all_formats:
+                    fmt_url = fmt.get("url")
+                    if not fmt_url:
+                        continue
+
+                    vcodec = fmt.get("vcodec", "")
+                    acodec = fmt.get("acodec", "")
+                    filesize = fmt.get("filesize") or fmt.get("filesize_approx")
+                    fmt_id = str(fmt.get("format_id", "best"))
+
+                    # MUSIC TAB FILTERING: Only Audios Output
+                    if type == "music" or type == "audio":
+                        if vcodec == "none" or "audio" in fmt.get("format_note", "").lower():
+                            formatted_list.append({
+                                "format_id": fmt_id,
+                                "ext": fmt.get("ext", "m4a"),
+                                "resolution": "Audio Only",
+                                "filesize": filesize,
+                                "vcodec": "none",
+                                "acodec": acodec,
+                                "url": fmt_url
+                            })
+                    # YOUTUBE TAB FILTERING: All Formats
+                    else:
+                        res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "Video"
+                        formatted_list.append({
+                            "format_id": fmt_id,
                             "ext": fmt.get("ext", "mp4"),
-                            "resolution": res_label,
-                            "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
+                            "resolution": res,
+                            "filesize": filesize,
                             "vcodec": vcodec,
                             "acodec": acodec,
-                            "url": fmt.get("url")
+                            "url": fmt_url
                         })
 
-                if not formats and info.get("url"):
-                    formats.append({
-                        "format_id": "0",
-                        "ext": info.get("ext", "mp4"),
-                        "resolution": "Direct Stream",
+                # Fallback if no specific format extracted
+                if not formatted_list and info.get("url"):
+                    formatted_list.append({
+                        "format_id": "best",
+                        "ext": "m4a" if type == "music" else "mp4",
+                        "resolution": "Audio Stream" if type == "music" else "Original Stream",
                         "filesize": None,
-                        "vcodec": None,
-                        "acodec": None,
+                        "vcodec": "none" if type == "music" else None,
+                        "acodec": "default",
                         "url": info.get("url")
                     })
 
                 return {
-                    "title": info.get("title", "YouTube Media"),
+                    "title": info.get("title", "Media"),
                     "duration": info.get("duration"),
                     "thumbnail": info.get("thumbnail"),
                     "uploader": info.get("uploader"),
-                    "formats": formats
+                    "formats": formatted_list
                 }
 
         except Exception as e:
             last_error = str(e)
-            print(f"[Error Attempt {attempt + 1}]: {last_error}")
-
-            if any(err in last_error.lower() for err in ["sign in to confirm", "bot", "429", "reloaded", "player response"]):
+            if "bot" in last_error.lower() or "429" in last_error:
                 trigger_tor_new_ip()
 
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Failed after 3 automatic retries: {last_error}"}
+        content={"detail": f"Error: {last_error}"}
     )
 
 @app.get("/download")
-def download_stream(url: str = Query(...), format_id: str = Query(default=None)):
+def download_stream(url: str = Query(...), format_id: Optional[str] = Query(default=None)):
     last_error = ""
 
     for attempt in range(3):
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
 
-        # Do NOT pass format filters to yt-dlp to avoid format resolution crashes
         ydl_opts = build_yt_dlp_options(proxy, cookie_file)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if not info:
-                    raise Exception("No info received")
+                    raise Exception("Failed to load video stream")
 
-                download_url = None
+                target_url = None
 
-                # Find specific URL matching requested format_id if available
+                # Find requested format URL safely
                 if format_id and info.get("formats"):
                     for fmt in info["formats"]:
                         if str(fmt.get("format_id")) == str(format_id) and fmt.get("url"):
-                            download_url = fmt.get("url")
+                            target_url = fmt.get("url")
                             break
 
-                # Fallback to general URL
-                if not download_url:
-                    download_url = info.get("url")
+                if not target_url:
+                    target_url = info.get("url")
 
-                if not download_url and "requested_formats" in info and len(info["requested_formats"]) > 0:
-                    download_url = info["requested_formats"][0].get("url")
+                if not target_url and "requested_formats" in info:
+                    target_url = info["requested_formats"][0].get("url")
 
-                if download_url:
+                if target_url:
                     return {
-                        "download_url": download_url,
+                        "download_url": target_url,
                         "title": info.get("title"),
                         "ext": info.get("ext", "mp4")
                     }
 
         except Exception as e:
             last_error = str(e)
-            print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
-            if any(err in last_error.lower() for err in ["sign in to confirm", "bot", "reloaded", "player response"]):
+            if "bot" in last_error.lower() or "429" in last_error:
                 trigger_tor_new_ip()
 
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Failed to generate stream link: {last_error}"}
+        content={"detail": f"Error: {last_error}"}
     )
