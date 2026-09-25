@@ -95,8 +95,8 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
+        'format': '*',  # 'all' formats allowed without restriction
         'check_formats': False,
-        'ignoreerrors': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
             'youtube': {
@@ -148,7 +148,7 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if not info:
-                    raise Exception("Could not fetch video info from YouTube")
+                    raise Exception("No data extracted")
 
                 formats = []
                 raw_formats = info.get("formats", [])
@@ -157,11 +157,11 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                     raw_formats = [info]
 
                 for fmt in raw_formats:
-                    # Direct play/download possible streams only
+                    # Collect every available direct format URL
                     if fmt.get("url"):
                         res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "video/audio"
                         formats.append({
-                            "format_id": fmt.get("format_id"),
+                            "format_id": fmt.get("format_id", "0"),
                             "ext": fmt.get("ext", "mp4"),
                             "resolution": res,
                             "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
@@ -170,12 +170,12 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                             "url": fmt.get("url")
                         })
 
-                # Fallback format if list is empty
+                # Fallback if yt-dlp returns main URL directly
                 if not formats and info.get("url"):
                     formats.append({
-                        "format_id": "best",
+                        "format_id": "0",
                         "ext": info.get("ext", "mp4"),
-                        "resolution": "default",
+                        "resolution": "Original Format",
                         "filesize": None,
                         "vcodec": None,
                         "acodec": None,
@@ -206,28 +206,25 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 def download_stream(url: str = Query(...), format_id: str = Query(default=None)):
     last_error = ""
 
-    # Requested format search with intelligent fallback chain
-    if format_id and format_id != "best":
-        target_format = f"{format_id}/b/best/bestvideo+bestaudio"
-    else:
-        target_format = "b/best/bestvideo+bestaudio"
-
     for attempt in range(3):
         cookie_file = get_next_cookie_file()
         proxy = get_proxy_for_attempt(attempt)
 
-        extra_opts = {'format': target_format}
+        # If format_id is provided, request that specific ID; otherwise fallback to '*'
+        target_fmt = format_id if (format_id and format_id != "best") else "*"
+        extra_opts = {'format': target_fmt}
+        
         ydl_opts = build_yt_dlp_options(proxy, cookie_file, extra_opts)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if not info:
-                    raise Exception("No stream metadata returned")
+                    raise Exception("No info received")
 
                 download_url = info.get("url")
 
-                if not download_url and "requested_formats" in info:
+                if not download_url and "requested_formats" in info and len(info["requested_formats"]) > 0:
                     download_url = info["requested_formats"][0].get("url")
 
                 if download_url:
