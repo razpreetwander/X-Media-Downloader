@@ -95,11 +95,11 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'android_creator'],
-                'player_skip': ['webpage', 'configs'],
+                'player_client': ['android', 'mweb', 'web', 'ios'],
+                'player_skip': ['configs']
             }
         }
     }
@@ -170,8 +170,8 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
         except Exception as e:
             last_error = str(e)
             print(f"[Error Attempt {attempt + 1}]: {last_error}")
-            
-            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "429" in last_error or "reloaded" in last_error.lower():
+
+            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "429" in last_error or "reloaded" in last_error.lower() or "player response" in last_error.lower():
                 trigger_tor_new_ip()
 
     return JSONResponse(
@@ -208,7 +208,7 @@ def download_stream(url: str = Query(...), format_id: str = Query(default="best"
         except Exception as e:
             last_error = str(e)
             print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
-            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "reloaded" in last_error.lower():
+            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "reloaded" in last_error.lower() or "player response" in last_error.lower():
                 trigger_tor_new_ip()
 
     return JSONResponse(
