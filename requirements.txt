@@ -1,5 +1,6 @@
 FastAPI>=0.100.0
 uvicorn[standard]>=0.20.0
-yt-dlp-nightly
+git+https://github.com/yt-dlp/yt-dlp.git@master
 requests[socks]>=2.31.0
 PySocks>=1.7.1
+
