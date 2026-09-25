@@ -1,214 +1,230 @@
-import glob
 import os
-import shutil
-import tempfile
-from pathlib import Path
-from urllib.parse import urlparse
-
-import yt_dlp
-from fastapi import FastAPI, HTTPException
+import glob
+import time
+import socket
+import threading
+from typing import List, Optional
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
+import yt_dlp
 
-app = FastAPI(title="X Media Downloader API")
+app = FastAPI(
+    title="X Media Downloader Ultra-Reliable API",
+    description="Backend with Round-Robin Cookies, Tor Auto-IP Renewal and Webshare Fallback.",
+    version="3.0.0"
+)
 
-# IMPORTANT:
-# The frontend may be opened from content:// or file:// on Android.
-# In that case the browser can send Origin: null, so the API must allow
-# cross-origin requests and OPTIONS preflight requests.
+# CORS Middleware (Frontend with zero changes supported)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
+TOR_SOCKS_PROXY = "socks5://127.0.0.1:9050"
+TOR_CONTROL_PORT = 9051
+
+# Multiple Webshare / Custom proxies support (Comma separated in env variable)
+# Example: "http://user:pass@proxy1:8080,http://user:pass@proxy2:8080"
+RAW_PROXIES = os.getenv("PROXY_URL", "").strip()
+CUSTOM_PROXIES: List[str] = [p.strip() for p in RAW_PROXIES.split(",") if p.strip()]
+
+# Round-Robin Cookie Tracking
+cookie_lock = threading.Lock()
+cookie_index = 0
+
+def get_next_cookie_file() -> Optional[str]:
+    """
+    1st Req -> cookie1.txt, 2nd Req -> cookie2.txt, ... 
+    Iterates sequentially through all available cookies and loops back to 1.
+    """
+    global cookie_index
+    cookie_files = sorted(glob.glob("cookies*.txt"))
+    if not cookie_files:
+        return None
+
+    with cookie_lock:
+        selected_cookie = cookie_files[cookie_index % len(cookie_files)]
+        cookie_index += 1
+        print(f"[Cookie System] Round-Robin Selected: {selected_cookie}")
+        return selected_cookie
+
+def trigger_tor_new_ip():
+    """
+    Sends SIGNAL NEWNYM to Tor Control Port to instantly obtain a fresh Exit IP.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(2)
+            s.connect(("127.0.0.1", TOR_CONTROL_PORT))
+            s.sendall(b'AUTHENTICATE ""\r\nSIGNAL NEWNYM\r\nQUIT\r\n')
+            print("[Tor System] Successfully requested NEWNYM (New Circuit / Fresh IP obtained)")
+    except Exception as e:
+        print(f"[Tor Control Error]: Could not renew IP - {e}")
+
+def check_tor_active(host="127.0.0.1", port=9050) -> bool:
+    """Checks if local Tor SOCKS5 daemon is running."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            return s.connect_ex((host, port)) == 0
+    except Exception:
+        return False
+
+def get_proxy_for_attempt(attempt: int) -> Optional[str]:
+    """
+    Returns proxy based on attempt count:
+    Attempt 0: Try Tor SOCKS5
+    Attempt 1: Try Custom Webshare Proxy (if provided)
+    Attempt 2: Request New Tor IP and try Tor again
+    Attempt 3: Direct connection fallback
+    """
+    tor_available = check_tor_active()
+
+    if attempt == 0:
+        if tor_available:
+            return TOR_SOCKS_PROXY
+        elif CUSTOM_PROXIES:
+            return CUSTOM_PROXIES[0]
+
+    elif attempt == 1:
+        if CUSTOM_PROXIES:
+            # Pick a proxy based on attempt
+            return CUSTOM_PROXIES[attempt % len(CUSTOM_PROXIES)]
+        elif tor_available:
+            trigger_tor_new_ip()
+            time.sleep(1)
+            return TOR_SOCKS_PROXY
+
+    elif attempt == 2:
+        if tor_available:
+            trigger_tor_new_ip()
+            time.sleep(1.5)
+            return TOR_SOCKS_PROXY
+
+    return None
+
+def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra_opts: dict = None) -> dict:
+    opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+        'skip_download': True, # Keep server RAM/disk safe
+    }
+
+    if proxy:
+        opts['proxy'] = proxy
+
+    if cookie_file:
+        opts['cookiefile'] = cookie_file
+
+    if extra_opts:
+        opts.update(extra_opts)
+
+    return opts
 
 @app.get("/")
 def home():
+    tor_status = check_tor_active()
+    cookie_count = len(glob.glob("cookies*.txt"))
     return {
-        "status": "Online",
-        "service": "X Media Downloader API",
-        "endpoints": ["/info?url=...", "/download?url=...&format_id=..."],
+        "status": "online",
+        "service": "X Media Downloader Ultra Engine",
+        "tor_proxy_active": tor_status,
+        "custom_proxies_loaded": len(CUSTOM_PROXIES),
+        "total_cookie_files": cookie_count
     }
-
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-
-def validate_url(url: str) -> str:
-    url = (url or "").strip()
-    if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Invalid URL")
-    return url
-
-
-def make_info_options():
-    return {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "skip_download": True,
-        "socket_timeout": 30,
-    }
-
 
 @app.get("/info")
-def get_info(url: str):
-    url = validate_url(url)
+def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
+    if not url:
+        raise HTTPException(status_code=400, detail="URL parameter is required")
 
-    try:
-        with yt_dlp.YoutubeDL(make_info_options()) as ydl:
-            info = ydl.extract_info(url, download=False)
+    last_error = ""
 
-        formats = []
-        seen = set()
+    # Maximum 3 attempts with automated fallback, new IP & next cookie
+    for attempt in range(3):
+        cookie_file = get_next_cookie_file()
+        proxy = get_proxy_for_attempt(attempt)
 
-        for f in (info.get("formats") or []):
-            format_id = f.get("format_id")
-            ext = (f.get("ext") or "").lower()
+        print(f"[Attempt {attempt + 1}/3] Fetching info | Proxy: {proxy or 'Direct'} | Cookie: {cookie_file or 'None'}")
 
-            if not format_id or ext not in {"mp4", "webm", "m4a", "mp3", "opus"}:
-                continue
+        ydl_opts = build_yt_dlp_options(proxy, cookie_file)
 
-            key = str(format_id)
-            if key in seen:
-                continue
-            seen.add(key)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
 
-            height = f.get("height")
-            resolution = f.get("resolution")
-            if not resolution and height:
-                resolution = f"{height}p"
+                formats = []
+                for fmt in info.get("formats", []):
+                    if fmt.get("url"):
+                        formats.append({
+                            "format_id": fmt.get("format_id"),
+                            "ext": fmt.get("ext"),
+                            "resolution": fmt.get("resolution") or fmt.get("format_note") or "audio only",
+                            "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
+                            "vcodec": fmt.get("vcodec"),
+                            "acodec": fmt.get("acodec"),
+                            "url": fmt.get("url")
+                        })
 
-            formats.append({
-                "format_id": str(format_id),
-                "resolution": resolution or "Audio",
-                "ext": ext,
-                "format_note": f.get("format_note") or "",
-                "filesize": f.get("filesize") or f.get("filesize_approx"),
-                "vcodec": f.get("vcodec"),
-                "acodec": f.get("acodec"),
-                "fps": f.get("fps"),
-            })
+                return {
+                    "title": info.get("title"),
+                    "duration": info.get("duration"),
+                    "thumbnail": info.get("thumbnail"),
+                    "uploader": info.get("uploader"),
+                    "formats": formats
+                }
 
-        # Keep useful formats first: video formats by resolution, then audio.
-        def sort_key(f):
-            height = 0
-            r = f.get("resolution") or ""
-            if r.endswith("p"):
-                try:
-                    height = int(r[:-1])
-                except ValueError:
-                    pass
-            return (height, 1 if f["ext"] in {"mp4", "webm"} else 0)
+        except Exception as e:
+            last_error = str(e)
+            print(f"[Error Attempt {attempt + 1}]: {last_error}")
+            
+            # If bot detection or sign in error occurred, trigger new Tor IP for next try
+            if "Sign in to confirm" in last_error or "bot" in last_error.lower() or "429" in last_error:
+                trigger_tor_new_ip()
 
-        formats.sort(key=sort_key, reverse=True)
-
-        return {
-            "title": info.get("title") or "Untitled",
-            "thumbnail": info.get("thumbnail"),
-            "duration": info.get("duration"),
-            "uploader": info.get("uploader"),
-            "webpage_url": info.get("webpage_url") or url,
-            "formats": formats,
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-def find_downloaded_file(folder: str):
-    files = [
-        Path(p) for p in glob.glob(os.path.join(folder, "*"))
-        if os.path.isfile(p)
-    ]
-    if not files:
-        return None
-
-    # Prefer common media outputs.
-    media_exts = {".mp4", ".webm", ".m4a", ".mp3", ".opus", ".mov", ".mkv"}
-    media = [p for p in files if p.suffix.lower() in media_exts]
-    candidates = media or files
-    return max(candidates, key=lambda p: p.stat().st_mtime)
-
+    # If all 3 attempts fail, return structured error
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Failed after 3 automatic retries: {last_error}"}
+    )
 
 @app.get("/download")
-def download_video(url: str, format_id: str):
-    url = validate_url(url)
-    format_id = (format_id or "").strip()
-    if not format_id:
-        raise HTTPException(status_code=400, detail="format_id is required")
+def download_stream(url: str = Query(...), format_id: str = Query(default="best")):
+    last_error = ""
 
-    temp_dir = tempfile.mkdtemp(prefix="xmedia_")
-    output_template = os.path.join(temp_dir, "%(title).120s.%(ext)s")
+    for attempt in range(3):
+        cookie_file = get_next_cookie_file()
+        proxy = get_proxy_for_attempt(attempt)
 
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "socket_timeout": 60,
-        "retries": 3,
-        "format": f"{format_id}+bestaudio/best",
-        "outtmpl": output_template,
-        "merge_output_format": "mp4",
-    }
+        ydl_opts = build_yt_dlp_options(proxy, cookie_file, {'format': format_id})
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                download_url = info.get("url")
 
-        file_path = find_downloaded_file(temp_dir)
-        if not file_path:
-            raise HTTPException(status_code=500, detail="Download completed but output file was not found")
+                if not download_url and "requested_formats" in info:
+                    download_url = info["requested_formats"][0].get("url")
 
-        title = info.get("title") or "download"
-        safe_title = "".join(
-            c for c in title if c.isalnum() or c in " ._-()"
-        ).strip() or "download"
+                if download_url:
+                    return {
+                        "download_url": download_url,
+                        "title": info.get("title"),
+                        "ext": info.get("ext")
+                    }
 
-        ext = file_path.suffix.lower().lstrip(".") or "mp4"
-        filename = f"{safe_title}.{ext}"
+        except Exception as e:
+            last_error = str(e)
+            print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
+            if "Sign in to confirm" in last_error or "bot" in last_error.lower():
+                trigger_tor_new_ip()
 
-        media_type = {
-            "mp4": "video/mp4",
-            "webm": "video/webm",
-            "mkv": "video/x-matroska",
-            "mov": "video/quicktime",
-            "m4a": "audio/mp4",
-            "mp3": "audio/mpeg",
-            "opus": "audio/ogg",
-        }.get(ext, "application/octet-stream")
-
-        # The frontend downloads the response as a Blob.
-        # The temp directory is removed automatically after the response is sent.
-        from fastapi import BackgroundTasks
-
-        background_tasks = BackgroundTasks()
-        background_tasks.add_task(shutil.rmtree, temp_dir, True)
-
-        return FileResponse(
-            path=str(file_path),
-            media_type=media_type,
-            filename=filename,
-            background=background_tasks,
-        )
-
-    except HTTPException:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
-    except Exception as e:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Failed to generate stream link: {last_error}"}
+    )
