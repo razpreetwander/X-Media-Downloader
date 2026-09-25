@@ -1,4 +1,4 @@
-<!-- STREAMING_CHUNK:Setting up base system dependencies and Tor configuration -->
+
 Base Python Image
 FROM python:3.11-slim
 Install Tor, netcat and system utilities
