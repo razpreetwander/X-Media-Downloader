@@ -95,12 +95,11 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'format': 'best',
-        'user_agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11; US) gzip',
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
             'youtube': {
                 'player_client': ['android', 'ios', 'mweb'],
-                'skip': ['webpage']
+                'skip': ['configs']
             }
         }
     }
@@ -148,12 +147,18 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                 info = ydl.extract_info(url, download=False)
 
                 formats = []
-                for fmt in info.get("formats", []):
+                raw_formats = info.get("formats", [])
+                
+                # Fallback if yt-dlp extracted single stream
+                if not raw_formats and info.get("url"):
+                    raw_formats = [info]
+
+                for fmt in raw_formats:
                     if fmt.get("url"):
                         formats.append({
-                            "format_id": fmt.get("format_id"),
-                            "ext": fmt.get("ext"),
-                            "resolution": fmt.get("resolution") or fmt.get("format_note") or "audio only",
+                            "format_id": fmt.get("format_id", "best"),
+                            "ext": fmt.get("ext", "mp4"),
+                            "resolution": fmt.get("resolution") or fmt.get("format_note") or "video/audio",
                             "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
                             "vcodec": fmt.get("vcodec"),
                             "acodec": fmt.get("acodec"),
@@ -161,7 +166,7 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
                         })
 
                 return {
-                    "title": info.get("title"),
+                    "title": info.get("title", "YouTube Media"),
                     "duration": info.get("duration"),
                     "thumbnail": info.get("thumbnail"),
                     "uploader": info.get("uploader"),
