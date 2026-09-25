@@ -1,9 +1,10 @@
 # Base Python Image
 FROM python:3.11-slim
 
-# Install Tor, netcat and system utilities
+# Install Tor, git, netcat and system utilities
 RUN apt-get update && apt-get install -y \
     tor \
+    git \
     netcat-openbsd \
     curl \
     procps \
