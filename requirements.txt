@@ -1,5 +1,5 @@
-fastapi>=0.100.0
+FastAPI>=0.100.0
 uvicorn[standard]>=0.20.0
-yt-dlp>=2024.08.06
+yt-dlp-nightly
 requests[socks]>=2.31.0
 PySocks>=1.7.1
