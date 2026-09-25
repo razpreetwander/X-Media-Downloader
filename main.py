@@ -95,12 +95,13 @@ def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'check_formats': False,  # Format checking fail होने से रोकता है
+        'check_formats': False,
+        'ignoreerrors': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embedded', 'android', 'web'],
-                'player_skip': ['webpage', 'configs']
+                'player_client': ['android', 'ios', 'mweb'],
+                'skip': ['configs']
             }
         }
     }
@@ -141,36 +142,44 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 
         print(f"[Attempt {attempt + 1}/3] Fetching info | Proxy: {proxy or 'Direct'} | Cookie: {cookie_file or 'None'}")
 
-        # Format restriction पूरी तरह से हटा दी गई है
         ydl_opts = build_yt_dlp_options(proxy, cookie_file)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise Exception("Could not fetch video info from YouTube")
 
                 formats = []
                 raw_formats = info.get("formats", [])
-
+                
                 if not raw_formats and info.get("url"):
                     raw_formats = [info]
 
                 for fmt in raw_formats:
-                    # Video/Audio resolution extract करना
-                    res = fmt.get("resolution")
-                    if not res or res == "multiple":
-                        if fmt.get("height"):
-                            res = f"{fmt.get('height')}p"
-                        else:
-                            res = fmt.get("format_note") or "Audio/Video"
+                    # Direct play/download possible streams only
+                    if fmt.get("url"):
+                        res = fmt.get("resolution") or (f"{fmt.get('height')}p" if fmt.get('height') else None) or fmt.get("format_note") or "video/audio"
+                        formats.append({
+                            "format_id": fmt.get("format_id"),
+                            "ext": fmt.get("ext", "mp4"),
+                            "resolution": res,
+                            "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
+                            "vcodec": fmt.get("vcodec"),
+                            "acodec": fmt.get("acodec"),
+                            "url": fmt.get("url")
+                        })
 
+                # Fallback format if list is empty
+                if not formats and info.get("url"):
                     formats.append({
-                        "format_id": fmt.get("format_id", "best"),
-                        "ext": fmt.get("ext", "mp4"),
-                        "resolution": res,
-                        "filesize": fmt.get("filesize") or fmt.get("filesize_approx"),
-                        "vcodec": fmt.get("vcodec"),
-                        "acodec": fmt.get("acodec"),
-                        "url": fmt.get("url") or info.get("url")
+                        "format_id": "best",
+                        "ext": info.get("ext", "mp4"),
+                        "resolution": "default",
+                        "filesize": None,
+                        "vcodec": None,
+                        "acodec": None,
+                        "url": info.get("url")
                     })
 
                 return {
@@ -197,8 +206,11 @@ def get_info(url: str = Query(..., description="YouTube Video or Shorts URL")):
 def download_stream(url: str = Query(...), format_id: str = Query(default=None)):
     last_error = ""
 
-    # अगर format_id सही न मिले तो "best" ऑटो-फॉलस्टैंक करेगा
-    target_format = format_id if (format_id and format_id != "best") else "bestvideo+bestaudio/best"
+    # Requested format search with intelligent fallback chain
+    if format_id and format_id != "best":
+        target_format = f"{format_id}/b/best/bestvideo+bestaudio"
+    else:
+        target_format = "b/best/bestvideo+bestaudio"
 
     for attempt in range(3):
         cookie_file = get_next_cookie_file()
@@ -210,6 +222,9 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
+                if not info:
+                    raise Exception("No stream metadata returned")
+
                 download_url = info.get("url")
 
                 if not download_url and "requested_formats" in info:
@@ -225,22 +240,6 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         except Exception as e:
             last_error = str(e)
             print(f"[Error Download Attempt {attempt + 1}]: {last_error}")
-            
-            # Error Fallback: अगर चुना हुआ format ना मिले तो 'best' से डायरेक्ट लिंक निकालना
-            try:
-                fallback_opts = build_yt_dlp_options(proxy, cookie_file, {'format': 'best'})
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
-                    fb_info = ydl_fb.extract_info(url, download=False)
-                    fb_url = fb_info.get("url")
-                    if fb_url:
-                        return {
-                            "download_url": fb_url,
-                            "title": fb_info.get("title"),
-                            "ext": fb_info.get("ext")
-                        }
-            except Exception:
-                pass
-
             if any(err in last_error.lower() for err in ["sign in to confirm", "bot", "reloaded", "player response"]):
                 trigger_tor_new_ip()
 
