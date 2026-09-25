@@ -13,7 +13,7 @@ import yt_dlp
 app = FastAPI(
     title="X Media Downloader Ultra-Reliable API",
     description="Backend with Round-Robin Cookies (YouTube Only), Tor Auto-IP Renewal and Unfiltered Formats Output.",
-    version="3.1.0"
+    version="3.2.0"
 )
 
 # CORS Middleware
@@ -103,12 +103,12 @@ def get_proxy_for_attempt(attempt: int) -> Optional[str]:
     return None
 
 def build_yt_dlp_options(proxy: Optional[str], cookie_file: Optional[str], extra_opts: dict = None) -> dict:
+    # KOI BHI STRICT FORMAT SPECIFY NHI KIYA HAI
     opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
         'skip_download': True,
-        'format': 'all',  # Accept ALL formats dynamically without restrictions
         'check_formats': False,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
     }
@@ -157,10 +157,9 @@ def get_info(url: str = Query(..., description="Media URL (YouTube, Twitter, Ins
                 if not info:
                     raise Exception("No data extracted")
 
-                # Extract raw formats straight from yt-dlp without strict filtering
+                # Direct yt-dlp raw formats bina kisi format filter / restriction ke
                 raw_formats = info.get("formats", [])
                 
-                # Fallback if single-stream media without explicitly listed formats
                 if not raw_formats:
                     raw_formats = [info]
 
@@ -170,7 +169,7 @@ def get_info(url: str = Query(..., description="Media URL (YouTube, Twitter, Ins
                     "thumbnail": info.get("thumbnail"),
                     "uploader": info.get("uploader"),
                     "extractor": info.get("extractor"),
-                    "formats": raw_formats  # Raw, unfiltered format data sent same to same
+                    "formats": raw_formats  # Directly outputs all exact raw yt-dlp formats
                 }
 
         except Exception as e:
@@ -193,10 +192,11 @@ def download_stream(url: str = Query(...), format_id: str = Query(default=None))
         cookie_file = get_next_cookie_file(url)
         proxy = get_proxy_for_attempt(attempt)
 
-        # Target the requested format directly if provided, else fetch best available
-        target_fmt = format_id if format_id else "best/bestvideo+bestaudio"
+        extra_opts = {}
+        # Agar user specific format_id paas kare toh hi pass hoga, warna yt-dlp ka default behavior
+        if format_id:
+            extra_opts['format'] = format_id
 
-        extra_opts = {'format': target_fmt}
         ydl_opts = build_yt_dlp_options(proxy, cookie_file, extra_opts)
 
         try:
